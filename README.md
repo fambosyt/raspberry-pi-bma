@@ -1,5 +1,5 @@
-# raspberry-pi-fire-control 🔥🧯
-This project is about a RaspberryPi 3 that is used as a fire alarm control panel.
+# raspberry-pi-bma 🔥🧯
+This project is about a RaspberryPi 5 that is used as a fire alarm control panel.
 
 ## First
 There is also an explanatory video for this project and a demonstration on YouTube. [Check it out](https://youtu.be/qD9vU8PJhmU?si=HSxL3lxSPtzYpJKj)
