@@ -1,18 +1,13 @@
-#!/usr/bin/env python
-# Coding by Easy Tec | easytec.tech
-# v5 - mit USB-Audio (MP3) Alarm
+# v6 - mit Touch-GUI für 7" HDMI Touchdisplay
 #
-# Voraussetzung:
-# - Lege eine MP3 z.B. sounds/alarm.mp3 im Projektordner ab
-# - Installiere mpg123 und alsa-utils auf dem Raspberry Pi:
-#     sudo apt update
-#     sudo apt install -y mpg123 alsa-utils
+# Voraussetzungen:
+# - audio.py (SoundPlayer) im selben Verzeichnis
+# - mpg123, alsa-utils: sudo apt update && sudo apt install -y mpg123 alsa-utils
+# - Tkinter: sudo apt install -y python3-tk
 #
-# Du kannst das Ausgabegerät überschreiben mit der ENV VAR SOUND_DEVICE, z.B.:
-#   SOUND_DEVICE=hw:1,0 python3 main.py
-#
-# Audio-Implementation nutzt audio.py (SoundPlayer). Stelle sicher, dass audio.py
-# im selben Verzeichnis liegt.
+# Bedienung:
+# - Touch-Buttons: Mute, Reset, Simulate Alarm
+# - Hardware-Buttons (wie vorher) funktionieren weiterhin
 
 import os
 import signal
@@ -20,28 +15,28 @@ import time
 import logging
 import threading
 import queue
+import tkinter as tk
+from tkinter import font
 import RPi.GPIO as GPIO
 
-from audio import SoundPlayer  # audio.py muss im selben Ordner liegen
+from audio import SoundPlayer
 
-# --- Logging ---------------------------------------------------------------
+# --- Logging --------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger("easytec-alarm")
+LOG = logging.getLogger("easytec-alarm-gui")
 
 # --- GPIO pins (BOARD numbering) ------------------------------------------
-PIN_output_BUZ = 18  # pin number for your output 1 (buzzer)
-PIN_output_LED = 16  # pin number for your output 2 (LED)
-PIN_b_alarm = 36     # pin number for your alarm button
-PIN_b_reset = 37     # pin number for your reset button
+PIN_output_BUZ = 18  # Buzzer (Output)
+PIN_output_LED = 16  # LED (Output)
+PIN_b_alarm = 36     # Alarm button (Input)
+PIN_b_reset = 37     # Reset button (Input)
 
 GPIO.setmode(GPIO.BOARD)
 GPIO.setwarnings(False)
-
 GPIO.setup(PIN_output_BUZ, GPIO.OUT)
 GPIO.setup(PIN_output_LED, GPIO.OUT)
 GPIO.setup(PIN_b_alarm, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(PIN_b_reset, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
 GPIO.output(PIN_output_BUZ, GPIO.LOW)
 GPIO.output(PIN_output_LED, GPIO.LOW)
 
@@ -49,20 +44,18 @@ GPIO.output(PIN_output_LED, GPIO.LOW)
 ALARM_MP3 = os.environ.get("ALARM_MP3", "sounds/alarm.mp3")
 SOUND_DEVICE = os.environ.get("SOUND_DEVICE", None)
 
-# Shared state
-alarm_active = False   # True while alarm is active (until reset)
+alarm_active = False
 _state_lock = threading.Lock()
 
-# Audio command queue for the AudioWorker
 audio_cmd_q = queue.Queue()
 _stop_event = threading.Event()
 
+# Small flag to reflect if audio is currently playing (set by AudioWorker)
+audio_playing = False
+audio_playing_lock = threading.Lock()
+
 # --- Audio worker thread --------------------------------------------------
 class AudioWorker(threading.Thread):
-    """
-    Thread, der SoundPlayer besitzt und Befehle über eine Queue empfängt:
-    ('play', filepath), ('stop', None), ('exit', None)
-    """
     def __init__(self, cmd_queue: queue.Queue, device: str = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.daemon = True
@@ -71,12 +64,12 @@ class AudioWorker(threading.Thread):
         self.player = None
 
     def run(self):
+        global audio_playing
         LOG.info("AudioWorker startet, device=%s", self.device or "<auto>")
         try:
             self.player = SoundPlayer(device=self.device)
-        except Exception as e:
-            LOG.exception("Fehler beim Initialisieren des SoundPlayers: %s", e)
-            # trotzdem weiterlaufen, um keine Blockade zu erzeugen
+        except Exception:
+            LOG.exception("Fehler beim Initialisieren des SoundPlayers")
             self.player = None
 
         while not _stop_event.is_set():
@@ -88,11 +81,13 @@ class AudioWorker(threading.Thread):
             if cmd == "play":
                 filepath = arg
                 if not os.path.exists(filepath):
-                    LOG.error("Alarm-Datei nicht gefunden: %s", filepath)
+                    LOG.error("Alarm-MP3 nicht gefunden: %s", filepath)
                     continue
                 if self.player:
                     try:
                         self.player.play(filepath, interrupt=True)
+                        with audio_playing_lock:
+                            audio_playing = True
                         LOG.info("Spiele Alarm: %s", filepath)
                     except Exception:
                         LOG.exception("Fehler beim Abspielen")
@@ -102,30 +97,32 @@ class AudioWorker(threading.Thread):
                 if self.player:
                     try:
                         self.player.stop()
-                        LOG.info("Audio gestoppt")
                     except Exception:
                         LOG.exception("Fehler beim Stoppen der Audioausgabe")
+                with audio_playing_lock:
+                    audio_playing = False
+                LOG.info("Audio gestoppt")
             elif cmd == "exit":
-                LOG.info("AudioWorker erhält exit")
+                LOG.info("AudioWorker - exit erhalten")
                 break
 
-        # sicherstellen, dass der Player gestoppt ist
+        # Cleanup
         if self.player:
             try:
                 self.player.stop()
             except Exception:
                 pass
+        with audio_playing_lock:
+            audio_playing = False
         LOG.info("AudioWorker beendet")
 
-# --- Alarm / Button handling ----------------------------------------------
+# --- Alarm logic (wie zuvor) ----------------------------------------------
 def do_mute():
-    """Stummschalten: Buzzer aus, Audio stoppen."""
     GPIO.output(PIN_output_BUZ, GPIO.LOW)
     audio_cmd_q.put(("stop", None))
     LOG.info("Action: Alarm mute")
 
 def do_reset():
-    """Reset: Alarm beenden, LED aus, System zurücksetzen."""
     global alarm_active
     audio_cmd_q.put(("stop", None))
     GPIO.output(PIN_output_BUZ, GPIO.LOW)
@@ -136,61 +133,45 @@ def do_reset():
 
 def alarm_handler():
     """
-    Handler, der bei Auslösen des Alarm-Knopfs in einem eigenen Thread läuft.
-    Erwartet zwei Drücke des Reset-Buttons:
-      - erster Druck -> Mute (Buzzer aus, Audio stop)
-      - zweiter Druck -> Reset (Alarm zurücksetzen)
+    Wird beim Auslösen gestartet. Wartet auf zwei Reset-Tastendrücke:
+    1. -> Mute
+    2. -> Reset
     """
     global alarm_active
     with _state_lock:
         if alarm_active:
-            LOG.debug("Alarm already active, ignoring duplicate trigger")
+            LOG.debug("Alarm bereits aktiv, ignoriere weiteren Trigger")
             return
         alarm_active = True
 
-    # Aktiviere Alarm-Signale
     GPIO.output(PIN_output_BUZ, GPIO.HIGH)
     GPIO.output(PIN_output_LED, GPIO.HIGH)
     LOG.info("Action: Alarm triggered - starte Buzzer + LED + Audio")
-
-    # Starte Audio
     audio_cmd_q.put(("play", ALARM_MP3))
 
-    # Warte auf zwei Bestätigungen am Reset-Knopf
     press_count = 0
     try:
         while True:
-            # Polling mit kurzer Verzögerung, entprellen
             if GPIO.input(PIN_b_reset) == GPIO.HIGH:
-                # einfache Entprellung: warte bis losgelassen
                 time.sleep(0.05)
                 if GPIO.input(PIN_b_reset) == GPIO.HIGH:
                     press_count += 1
                     LOG.info("Reset-Knopf gedrückt (%d)", press_count)
-                    # Warte auf Loslassen
                     while GPIO.input(PIN_b_reset) == GPIO.HIGH:
                         time.sleep(0.05)
-                    # Erster Druck -> mute
                     if press_count == 1:
                         do_mute()
                         LOG.info("Warte auf zweiten Druck zum Reset...")
-                    # Zweiter Druck -> reset und beenden des Handlers
                     elif press_count >= 2:
                         do_reset()
                         break
             time.sleep(0.1)
     except Exception:
         LOG.exception("Fehler im Alarm-Handler")
-        # im Fehlerfall Alarm zurücksetzen
         do_reset()
 
-# --- Status LED Thread ----------------------------------------------------
+# --- Status light thread --------------------------------------------------
 def status_light_loop():
-    """
-    Blink-Status wenn kein Alarm aktiv:
-    (verhält sich ähnlich wie das Original: kurz an, dann lange Pause)
-    Wenn Alarm aktiv -> LED dauerhaft an.
-    """
     while not _stop_event.is_set():
         with _state_lock:
             active = alarm_active
@@ -198,33 +179,25 @@ def status_light_loop():
             GPIO.output(PIN_output_LED, GPIO.HIGH)
             time.sleep(0.5)
             continue
-        # nicht aktiv: kurzes Blinken (wie vorher)
+        # Nicht aktiv: kurzes Blinken (Originalverhalten)
         GPIO.output(PIN_output_LED, GPIO.HIGH)
         time.sleep(0.1)
         GPIO.output(PIN_output_LED, GPIO.LOW)
-        # lange Pause wie im Original
         for _ in range(100):
             if _stop_event.is_set():
                 break
             time.sleep(0.1)
 
-# --- Main loop (Button Überwachung) --------------------------------------
+# --- Main loop (Überwacht Alarm-Knopf) -----------------------------------
 def main_loop():
-    """
-    Überwacht den Alarm-Knopf. Beim Drücken wird ein Alarm-Handler-Thread gestartet.
-    """
-    LOG.info("System ready...")
+    LOG.info("System ready (Button-Überwachung läuft)...")
     while not _stop_event.is_set():
         try:
             if GPIO.input(PIN_b_alarm) == GPIO.HIGH:
-                LOG.info("Alarm-Knopf gedrückt")
-                # einfachen Debounce
+                LOG.info("Hardware Alarm-Knopf gedrückt")
                 time.sleep(0.05)
                 if GPIO.input(PIN_b_alarm) == GPIO.HIGH:
-                    # Starte Alarm-Handler in eigenem Thread, damit main loop weiterlaufen kann
-                    t = threading.Thread(target=alarm_handler, daemon=True)
-                    t.start()
-                    # Warte, bis der Knopf losgelassen wurde
+                    threading.Thread(target=alarm_handler, daemon=True).start()
                     while GPIO.input(PIN_b_alarm) == GPIO.HIGH and not _stop_event.is_set():
                         time.sleep(0.05)
             time.sleep(0.1)
@@ -232,47 +205,159 @@ def main_loop():
             LOG.exception("Fehler in main_loop")
             time.sleep(0.5)
 
-# --- Signal handler / Cleanup --------------------------------------------
+# --- GUI (Tkinter) -------------------------------------------------------
+class AlarmGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("EasyTec Alarm")
+        # Vollbild für Touchdisplay
+        self.root.attributes("-fullscreen", True)
+        # optional: Cursor verbergen
+        try:
+            self.root.config(cursor="none")
+        except Exception:
+            pass
+
+        # große Schriftarten
+        self.title_font = font.Font(size=36, weight="bold")
+        self.big_font = font.Font(size=28)
+        self.small_font = font.Font(size=18)
+
+        # Layout: Status oben, Buttons in der Mitte, Footer unten
+        self.status_var = tk.StringVar(value="Status: Unbekannt")
+        self.led_var = tk.StringVar(value="LED: Off")
+        self.buzz_var = tk.StringVar(value="Buzzer: Off")
+        self.audio_var = tk.StringVar(value="Audio: Stopped")
+
+        status_frame = tk.Frame(root, pady=20)
+        status_frame.pack(fill="x")
+        tk.Label(status_frame, text="EasyTec Alarm", font=self.title_font).pack()
+        tk.Label(status_frame, textvariable=self.status_var, font=self.big_font).pack()
+        tk.Label(status_frame, textvariable=self.led_var, font=self.small_font).pack()
+        tk.Label(status_frame, textvariable=self.buzz_var, font=self.small_font).pack()
+        tk.Label(status_frame, textvariable=self.audio_var, font=self.small_font).pack()
+
+        # Buttons
+        btn_frame = tk.Frame(root, pady=40)
+        btn_frame.pack(expand=True)
+
+        btn_play = tk.Button(btn_frame, text="Simulate Alarm", font=self.big_font, bg="#e74c3c", fg="white",
+                             width=18, height=2, command=self.simulate_alarm)
+        btn_play.grid(row=0, column=0, padx=10, pady=10)
+
+        btn_mute = tk.Button(btn_frame, text="Mute", font=self.big_font, bg="#f39c12", fg="white",
+                             width=18, height=2, command=self.gui_mute)
+        btn_mute.grid(row=0, column=1, padx=10, pady=10)
+
+        btn_reset = tk.Button(btn_frame, text="Reset", font=self.big_font, bg="#27ae60", fg="white",
+                              width=18, height=2, command=self.gui_reset)
+        btn_reset.grid(row=0, column=2, padx=10, pady=10)
+
+        # Footer: Exit button (klein), nützlich für Debugging
+        footer = tk.Frame(root)
+        footer.pack(side="bottom", pady=10)
+        tk.Button(footer, text="Exit", font=self.small_font, command=self.on_exit).pack()
+
+        # Start UI-Update-Loop
+        self.update_ui()
+
+    def simulate_alarm(self):
+        # Startet einen Alarm-Handler (wie Hardware-Trigger) in separatem Thread
+        threading.Thread(target=alarm_handler, daemon=True).start()
+
+    def gui_mute(self):
+        do_mute()
+
+    def gui_reset(self):
+        do_reset()
+
+    def on_exit(self):
+        LOG.info("GUI Exit gedrückt")
+        _stop_event.set()
+        audio_cmd_q.put(("exit", None))
+        self.root.quit()
+
+    def update_ui(self):
+        # Aktualisiere Status-Labels basierend auf globalen Variablen
+        with _state_lock:
+            active = alarm_active
+        if active:
+            self.status_var.set("Status: ALARM")
+        else:
+            self.status_var.set("Status: Ready")
+
+        # LED / Buzzer state aus GPIO auslesen
+        try:
+            led_state = GPIO.input(PIN_output_LED)
+            buzz_state = GPIO.input(PIN_output_BUZ)
+        except Exception:
+            led_state = 0
+            buzz_state = 0
+        self.led_var.set(f"LED: {'On' if led_state else 'Off'}")
+        self.buzz_var.set(f"Buzzer: {'On' if buzz_state else 'Off'}")
+
+        with audio_playing_lock:
+            ap = audio_playing
+        self.audio_var.set(f"Audio: {'Playing' if ap else 'Stopped'}")
+
+        # Wiederhole Update
+        if not _stop_event.is_set():
+            self.root.after(300, self.update_ui)
+
+# --- Signal handler ------------------------------------------------------
 def signal_handler(sig, frame):
     LOG.info("Signal empfangen, beende sauber...")
     _stop_event.set()
-    # sage dem AudioWorker, dass er beenden soll
     audio_cmd_q.put(("exit", None))
-    # warte kurz, damit Threads sauber stoppen können
-    time.sleep(0.3)
+    # allow GUI mainloop to exit
+    try:
+        # If Tk mainloop running, quit it
+        for w in tk._default_root.children.values():
+            try:
+                w.quit()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # cleanup GPIO
+    time.sleep(0.2)
     GPIO.cleanup()
     LOG.info("GPIO cleaned up. Exit.")
-    # allow process to exit
     raise SystemExit(0)
 
-# --- Start Threads --------------------------------------------------------
-if __name__ == "__main__":
-    # Prüfe, ob die MP3 vorhanden ist (nur Warnung)
+# --- Start everything ----------------------------------------------------
+def main():
+    # Warnung, wenn MP3 fehlt
     if not os.path.exists(ALARM_MP3):
         LOG.warning("Alarm-MP3 nicht gefunden: %s", ALARM_MP3)
-        LOG.warning("Lege die Datei im Projektordner an oder setze ALARM_MP3 env var.")
 
-    # Start AudioWorker
+    # Starte AudioWorker
     audio_worker = AudioWorker(audio_cmd_q, device=SOUND_DEVICE)
     audio_worker.start()
 
-    # Start status light thread
+    # Starte Hintergrund-Threads
     thread_status = threading.Thread(target=status_light_loop, daemon=True)
     thread_status.start()
-
-    # Start main loop thread
     thread_main = threading.Thread(target=main_loop, daemon=True)
     thread_main.start()
 
-    # Setup signal handler
+    # Setup signal handling
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Keep main thread alive to receive signals
+    # Tkinter GUI im Hauptthread
+    root = tk.Tk()
+    app = AlarmGUI(root)
     try:
-        while True:
-            time.sleep(1)
-    except SystemExit:
-        LOG.info("Programm beendet")
+        root.mainloop()
     except KeyboardInterrupt:
-        signal_handler(None, None)
+        LOG.info("KeyboardInterrupt in Tk mainloop")
+    finally:
+        _stop_event.set()
+        audio_cmd_q.put(("exit", None))
+        time.sleep(0.2)
+        GPIO.cleanup()
+        LOG.info("Programm beendet")
+
+if __name__ == "__main__":
+    main()
