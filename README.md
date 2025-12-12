@@ -1,11 +1,11 @@
 # raspberry-pi-bma 🔥🧯
-This project is about a RaspberryPi 5 that is used as a fire alarm control panel.
+This project is about a RaspberryPi 4 that is used as a fire alarm control panel.
 
 ## First
 There is also an explanatory video for this project and a demonstration on YouTube. [Check it out](https://youtu.be/qD9vU8PJhmU?si=HSxL3lxSPtzYpJKj)
 
 ## The following components are required:
-- 1x RaspberryPi (3b+) [other models will certainly work as well].
+- 1x RaspberryPi (4b)
 - 2x push button
 - 1x buzzer
 - 1x LED (red)
