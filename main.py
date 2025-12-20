@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# v9 - Realistisches, dunkles & professionelles Design
-# - dunkles Industrie-Theme (weniger weiß), realistischer LED-Glow, matte Panels
-# - Beibehaltung Funktionalität: AudioWorker, AlarmController, MockGPIO, Config
+# v8 - Visuell verbessertes Design (moderner, "industrial" / Siemens-like)
+# - modernes Farbschema, Gradient-Header, LED-Glow/Puls, größere typografische Hierarchie
+# - History als Treeview, schlanke Settings, Tastenkürzel
+# - Beibehaltung der Funktionalität: AudioWorker, AlarmController, MockGPIO, Config
 #
-# Hinweise:
-# - Keine externen Bilddateien nötig (nur Canvas/Ebenen für Effekte)
-# - Optional: später Icons / PNGs hinzufügen für noch realistischere Buttons
+# Voraussetzungen:
+# - audio.py (SoundPlayer) im selben Verzeichnis
+# - Tkinter (python3-tk)
+# - Optional: amixer für systemweite Lautstärke (ALS A)
+#
+# Hinweis: Diese Datei ersetzt main.py — UI-Änderungen sind rückwärtskompatibel.
 
 import os
 import signal
@@ -122,7 +126,7 @@ else:
     GPIO = MockGPIO()
     SIMULATE_GPIO = True
 
-# Setup pins
+# Setup pins (sicher in try/except)
 try:
     GPIO.setup(PIN_output_BUZ, GPIO.OUT)
     GPIO.setup(PIN_output_LED, GPIO.OUT)
@@ -343,39 +347,40 @@ def main_loop():
             LOG.exception("Fehler in main_loop")
             time.sleep(0.5)
 
-# --- UI: realistic dark design -------------------------------------------
-class RealisticTheme:
-    BG = "#0d1114"        # deep near-black slate
-    PANEL = "#14171b"     # panel metal
-    CARD = "#1a1f23"      # card background
-    ACCENT = "#0073b1"    # Siemens-like blue accent
-    ACCENT2 = "#3298d1"
-    TEXT = "#e6eef6"
-    MUTED = "#9aa6b2"
-    DANGER = "#ff6b6b"
-    SUCCESS = "#2ecc71"
-    SHADOW = "#0a0d0f"
+# --- UI: enhanced design -------------------------------------------------
+class BeautifulStyle:
+    # Farbpalette (Siemens-like, industrial & calm)
+    BG = "#f2f6f9"
+    ACCENT = "#0b5e88"       # deep teal / corporate
+    ACCENT2 = "#1f7fb0"
+    DANGER = "#c0392b"
+    WARNING = "#f39c12"
+    SUCCESS = "#27ae60"
+    CARD = "#ffffff"
+    MUTED = "#6b7a86"
 
     @staticmethod
     def apply(root, style: ttk.Style):
-        root.configure(background=RealisticTheme.BG)
+        root.configure(background=BeautifulStyle.BG)
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure("App.TFrame", background=RealisticTheme.BG)
-        style.configure("Card.TFrame", background=RealisticTheme.CARD, relief="flat")
-        style.configure("Header.TLabel", background=RealisticTheme.BG, foreground=RealisticTheme.ACCENT, font=("Segoe UI", 20, "bold"))
-        style.configure("SubHeader.TLabel", background=RealisticTheme.BG, foreground=RealisticTheme.MUTED, font=("Segoe UI", 10))
-        style.configure("Accent.TButton", foreground="white", background=RealisticTheme.ACCENT, font=("Segoe UI", 11, "bold"))
-        style.map("Accent.TButton", background=[("active", RealisticTheme.ACCENT2)])
-        style.configure("History.Treeview", background=RealisticTheme.CARD, fieldbackground=RealisticTheme.CARD, foreground=RealisticTheme.TEXT)
-        style.configure("Treeview.Heading", background=RealisticTheme.PANEL, foreground=RealisticTheme.TEXT)
+        style.configure("App.TFrame", background=BeautifulStyle.BG)
+        style.configure("Card.TFrame", background=BeautifulStyle.CARD, relief="flat", borderwidth=0)
+        style.configure("Header.TLabel", background=BeautifulStyle.BG, foreground=BeautifulStyle.ACCENT, font=("Helvetica", 24, "bold"))
+        style.configure("SubHeader.TLabel", background=BeautifulStyle.BG, foreground=BeautifulStyle.MUTED, font=("Helvetica", 10))
+        style.configure("Accent.TButton", foreground="white", background=BeautifulStyle.ACCENT, font=("Helvetica", 14, "bold"))
+        style.map("Accent.TButton", background=[("active", BeautifulStyle.ACCENT2)])
+        style.configure("Danger.TButton", foreground="white", background=BeautifulStyle.DANGER, font=("Helvetica", 14, "bold"))
+        style.configure("Success.TButton", foreground="white", background=BeautifulStyle.SUCCESS, font=("Helvetica", 14, "bold"))
+        style.configure("Warning.TButton", foreground="black", background=BeautifulStyle.WARNING, font=("Helvetica", 12, "bold"))
+        style.configure("History.Treeview", background=BeautifulStyle.CARD, fieldbackground=BeautifulStyle.CARD)
 
 class AlarmGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("EasyTec Alarm · Industrial")
+        self.root.title("EasyTec Alarm · Professional")
         self.root.attributes("-fullscreen", True)
         try:
             self.root.config(cursor="none")
@@ -383,183 +388,145 @@ class AlarmGUI:
             pass
 
         self.style = ttk.Style()
-        RealisticTheme.apply(self.root, self.style)
+        BeautifulStyle.apply(self.root, self.style)
 
         # Fonts
-        self.title_font = font.Font(family="Segoe UI", size=20, weight="bold")
-        self.large_font = font.Font(family="Segoe UI", size=16, weight="bold")
-        self.normal_font = font.Font(family="Segoe UI", size=11)
-        self.muted_font = font.Font(family="Segoe UI", size=10)
+        self.title_font = font.Font(family="Helvetica", size=28, weight="bold")
+        self.big_font = font.Font(family="Helvetica", size=20, weight="bold")
+        self.medium_font = font.Font(family="Helvetica", size=12)
+        self.small_font = font.Font(family="Helvetica", size=10)
 
-        # Top header (metal strip) built with Canvas to allow subtle gradient/reflection
-        self.header = tk.Canvas(root, height=90, highlightthickness=0, bg=RealisticTheme.BG)
-        self.header.pack(fill="x")
-        self._draw_metal_header()
+        # Top-level layout: header, content
+        self.header_canvas = tk.Canvas(root, height=110, highlightthickness=0)
+        self.header_canvas.pack(fill="x")
+        self._draw_header()
 
-        # Main area
-        main = ttk.Frame(root, style="App.TFrame", padding=16)
-        main.pack(fill="both", expand=True)
+        content = ttk.Frame(root, style="App.TFrame", padding=18)
+        content.pack(fill="both", expand=True)
 
-        left = ttk.Frame(main, style="App.TFrame")
+        left = ttk.Frame(content, style="App.TFrame")
         left.pack(side="left", fill="both", expand=True)
 
-        right = ttk.Frame(main, width=360, style="App.TFrame")
+        right = ttk.Frame(content, width=360, style="App.TFrame")
         right.pack(side="right", fill="y")
 
-        # Big card (status)
-        status_card = tk.Frame(left, bg=RealisticTheme.CARD, bd=0, highlightthickness=0)
-        status_card.pack(fill="both", expand=True, padx=(0,12), pady=6)
+        # Big status card
+        status_card = ttk.Frame(left, style="Card.TFrame", padding=20)
+        status_card.pack(fill="both", expand=True, padx=(0,12))
 
-        # Title
-        lbl_title = tk.Label(status_card, text="SYSTEM STATUS", bg=RealisticTheme.CARD, fg=RealisticTheme.ACCENT, font=self.title_font)
-        lbl_title.pack(anchor="w", padx=18, pady=(12,0))
-        lbl_sub = tk.Label(status_card, text="Industrial Alarm Console", bg=RealisticTheme.CARD, fg=RealisticTheme.MUTED, font=self.muted_font)
-        lbl_sub.pack(anchor="w", padx=18, pady=(0,10))
+        # Status title+subtitle
+        title = ttk.Label(status_card, text="SYSTEM STATUS", style="Header.TLabel")
+        title.pack(anchor="w")
+        subtitle = ttk.Label(status_card, text="Industrial Alarm Interface · Ready for deployment", style="SubHeader.TLabel")
+        subtitle.pack(anchor="w", pady=(0,10))
 
-        # Status row
-        status_row = tk.Frame(status_card, bg=RealisticTheme.CARD)
-        status_row.pack(fill="x", padx=18, pady=(6,12))
+        # Main status row
+        status_row = ttk.Frame(status_card, style="Card.TFrame")
+        status_row.pack(fill="x", pady=(6,14))
 
-        # LED assembly: multiple layered ovals for glow + reflection for realism
-        self.led_canvas = tk.Canvas(status_row, width=140, height=140, bg=RealisticTheme.CARD, highlightthickness=0)
-        self.led_canvas.pack(side="left", padx=(0,20))
-        # draw layered ovals (initially green/off)
-        self._led_glow_layers = []
-        glow_colors = ["#052020", "#06343a", "#075a50"]  # base subtle glows
-        for i, color in enumerate(glow_colors):
-            oval = self.led_canvas.create_oval(6+i*6, 6+i*6, 134-i*6, 134-i*6, fill=color, outline="")
-            self._led_glow_layers.append(oval)
-        # inner reflective circle
-        self._led_inner = self.led_canvas.create_oval(40, 40, 100, 100, fill="#2ecc71", outline="#1e8f53", width=2)
-        # sheen (reflection) - light arc
-        self._led_sheen = self.led_canvas.create_arc(40, 20, 100, 70, start=20, extent=120, style="pieslice", fill="#ffffff22", outline="")
+        # LED canvas with glow
+        self.led_canvas = tk.Canvas(status_row, width=120, height=120, highlightthickness=0, bg=BeautifulStyle.CARD)
+        self.led_canvas.pack(side="left", padx=(0,18))
+        # Glow layers
+        self._led_glow_big = self.led_canvas.create_oval(6,6,114,114, fill="", outline="")
+        self._led_glow_mid = self.led_canvas.create_oval(18,18,102,102, fill="", outline="")
+        self._led_circle = self.led_canvas.create_oval(34,34,86,86, fill="#2ecc71", outline="#1e8f53", width=2)
 
-        # status texts
-        txt_frame = tk.Frame(status_row, bg=RealisticTheme.CARD)
-        txt_frame.pack(fill="both", expand=True)
+        # Status text
+        status_text_frame = ttk.Frame(status_row, style="Card.TFrame")
+        status_text_frame.pack(fill="both", expand=True)
         self.status_var = tk.StringVar(value="Status: Initializing...")
-        tk.Label(txt_frame, textvariable=self.status_var, bg=RealisticTheme.CARD, fg=RealisticTheme.TEXT, font=self.large_font).pack(anchor="w")
+        self.status_label = ttk.Label(status_text_frame, textvariable=self.status_var, font=self.big_font, background=BeautifulStyle.CARD)
+        self.status_label.pack(anchor="w")
         self.detail_var = tk.StringVar(value="Letzte Aktion: —")
-        tk.Label(txt_frame, textvariable=self.detail_var, bg=RealisticTheme.CARD, fg=RealisticTheme.MUTED, font=self.normal_font).pack(anchor="w", pady=(6,0))
+        self.detail_label = ttk.Label(status_text_frame, textvariable=self.detail_var, font=self.medium_font, foreground=BeautifulStyle.MUTED, background=BeautifulStyle.CARD)
+        self.detail_label.pack(anchor="w", pady=(6,0))
 
-        # Audio indicator & progress
+        # Progress / audio indicator
         self.audio_var = tk.StringVar(value="Audio: Stopped")
-        tk.Label(status_card, textvariable=self.audio_var, bg=RealisticTheme.CARD, fg=RealisticTheme.TEXT, font=self.normal_font).pack(anchor="w", padx=18)
+        self.audio_label = ttk.Label(status_card, textvariable=self.audio_var, font=self.medium_font, background=BeautifulStyle.CARD)
+        self.audio_label.pack(anchor="w")
         self.progress = ttk.Progressbar(status_card, orient="horizontal", mode="indeterminate")
-        self.progress.pack(fill="x", padx=18, pady=(8,12))
+        self.progress.pack(fill="x", pady=(8,0))
 
-        # Action buttons: realistic flat buttons with subtle borders
-        actions = tk.Frame(status_card, bg=RealisticTheme.CARD)
-        actions.pack(fill="x", padx=18, pady=(6,16))
+        # Action buttons styled big
+        actions = ttk.Frame(status_card, style="Card.TFrame", padding=(0,10))
+        actions.pack(fill="x")
+        self.btn_simulate = tk.Button(actions, text=" 🔔  Simulate Alarm", bg=BeautifulStyle.DANGER, fg="white", bd=0, font=self.medium_font, activebackground="#e74c3c", command=self.simulate_alarm)
+        self.btn_simulate.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
+        self.btn_mute = tk.Button(actions, text=" 🔇  Mute", bg="#f39c12", fg="black", bd=0, font=self.medium_font, command=self.gui_mute)
+        self.btn_mute.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
+        self.btn_reset = tk.Button(actions, text=" ✅  Reset", bg=BeautifulStyle.SUCCESS, fg="white", bd=0, font=self.medium_font, command=self.gui_reset)
+        self.btn_reset.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
 
-        self.btn_simulate = tk.Button(actions, text="  🔔  ALARM  ", bg=RealisticTheme.DANGER, fg="white", activebackground="#ff7b7b", bd=0, font=self.large_font, command=self.simulate_alarm)
-        self.btn_simulate.pack(side="left", expand=True, fill="x", padx=6, ipadx=6, ipady=12)
-
-        self.btn_mute = tk.Button(actions, text="  🔇  MUTE  ", bg="#bf9b3b", fg="black", bd=0, font=self.normal_font, command=self.gui_mute)
-        self.btn_mute.pack(side="left", expand=True, fill="x", padx=6, ipadx=6, ipady=12)
-
-        self.btn_reset = tk.Button(actions, text="  ✔  RESET  ", bg=RealisticTheme.SUCCESS, fg="white", bd=0, font=self.normal_font, command=self.gui_reset)
-        self.btn_reset.pack(side="left", expand=True, fill="x", padx=6, ipadx=6, ipady=12)
-
-        # compact settings row
-        settings_row = tk.Frame(left, bg=RealisticTheme.CARD)
-        settings_row.pack(fill="x", padx=18, pady=(6,12))
-        tk.Label(settings_row, text="Alarm MP3", bg=RealisticTheme.CARD, fg=RealisticTheme.MUTED, font=self.normal_font).pack(side="left")
+        # Compact settings bar
+        settings_bar = ttk.Frame(left, style="Card.TFrame")
+        settings_bar.pack(fill="x", pady=(14,0))
+        ttk.Label(settings_bar, text="Alarm MP3", font=self.small_font, background=BeautifulStyle.BG).pack(side="left", padx=(0,6))
         self.mp3_var = tk.StringVar(value=ALARM_MP3)
-        tk.Entry(settings_row, textvariable=self.mp3_var, width=56, bg="#0f1417", fg=RealisticTheme.TEXT, insertbackground=RealisticTheme.TEXT).pack(side="left", padx=8)
-        tk.Button(settings_row, text="Browse", command=self.browse_mp3, bg=RealisticTheme.PANEL, fg=RealisticTheme.TEXT, bd=0).pack(side="left", padx=6)
+        ttk.Entry(settings_bar, textvariable=self.mp3_var, width=48).pack(side="left", padx=6)
+        ttk.Button(settings_bar, text="Browse", command=self.browse_mp3).pack(side="left", padx=6)
+        ttk.Button(settings_bar, text="Save", command=self.save_settings).pack(side="left", padx=6)
 
-        # Right column: realistic history card
-        right_card = tk.Frame(right, bg=RealisticTheme.CARD)
-        right_card.pack(fill="both", expand=True, padx=6, pady=6)
-        tk.Label(right_card, text="Event History", bg=RealisticTheme.CARD, fg=RealisticTheme.TEXT, font=self.normal_font).pack(anchor="w", padx=8, pady=(8,0))
+        # Right column: history + quick toggles
+        title_h = ttk.Label(right, text="Event History", font=self.medium_font, background=BeautifulStyle.BG)
+        title_h.pack(anchor="w", padx=6, pady=(6,0))
 
-        # Treeview-like list but styled for dark theme
-        self.history_list = tk.Listbox(right_card, bg="#0f1417", fg=RealisticTheme.TEXT, selectbackground="#223344", borderwidth=0)
-        self.history_list.pack(fill="both", expand=True, padx=8, pady=8)
+        # Treeview for history (time, event)
+        self.history_tv = ttk.Treeview(right, columns=("time", "event"), show="headings", height=18, style="History.Treeview")
+        self.history_tv.heading("time", text="Time")
+        self.history_tv.heading("event", text="Event")
+        self.history_tv.column("time", width=120, anchor="w")
+        self.history_tv.column("event", width=220, anchor="w")
+        self.history_tv.pack(fill="both", expand=True, padx=6, pady=6)
 
         # Quick controls
-        quick = tk.Frame(right_card, bg=RealisticTheme.CARD)
-        quick.pack(fill="x", padx=8, pady=(0,12))
-        tk.Button(quick, text="LED ON", command=self.force_led_on, bg=RealisticTheme.PANEL, fg=RealisticTheme.TEXT, bd=0).pack(side="left", padx=6, ipadx=8)
-        tk.Button(quick, text="LED OFF", command=self.force_led_off, bg=RealisticTheme.PANEL, fg=RealisticTheme.TEXT, bd=0).pack(side="left", padx=6, ipadx=8)
-        tk.Button(quick, text="Fullscreen", command=self.toggle_fullscreen, bg=RealisticTheme.PANEL, fg=RealisticTheme.TEXT, bd=0).pack(side="left", padx=6, ipadx=8)
+        quick = ttk.Frame(right, style="App.TFrame")
+        quick.pack(fill="x", padx=6, pady=6)
+        ttk.Button(quick, text="LED On", command=self.force_led_on).pack(side="left", padx=4, ipadx=10)
+        ttk.Button(quick, text="LED Off", command=self.force_led_off).pack(side="left", padx=4, ipadx=10)
+        ttk.Button(quick, text="Toggle FS", command=self.toggle_fullscreen).pack(side="left", padx=4, ipadx=10)
 
-        # Keyboard bindings
+        # Bind keyboard shortcuts
         root.bind("<Escape>", lambda e: self.toggle_fullscreen())
         root.bind("m", lambda e: self.gui_mute())
         root.bind("r", lambda e: self.gui_reset())
         root.bind("s", lambda e: self.simulate_alarm())
 
-        # LED pulse params
-        self._led_phase = 0.0
-
-        # Start updates
+        # UI update loops
+        self.led_pulse_phase = 0.0
         self.update_ui()
         self.root.after(700, self.update_history)
 
-    def _draw_metal_header(self):
-        c = self.header
-        w = c.winfo_screenwidth()
-        h = 90
-        # Dark metallic gradient band
-        for i in range(0, 90, 3):
-            col = self._lerp_color("#0b2230", "#07202a", i/90)
-            c.create_rectangle(0, i, w, i+3, fill=col, outline=col)
-        # Logo text
-        c.create_text(28, h/2, anchor="w", text="EASYTEC", font=("Segoe UI", 26, "bold"), fill="#dff6ff")
-        c.create_text(28, h/2 + 26, anchor="w", text="Industrial Alarm Console", font=("Segoe UI", 9), fill="#9fbfcf")
+    def _draw_header(self):
+        c = self.header_canvas
+        w = c.winfo_reqwidth() or c.winfo_screenwidth()
+        h = 110
+        # Draw simple horizontal gradient (approximation)
+        c.create_rectangle(0, 0, w, h, fill="#0b5e88", outline="")
+        c.create_text(28, h/2, anchor="w", text=" EASYTEC", font=("Helvetica", 28, "bold"), fill="white")
+        c.create_text(28, h/2 + 30, anchor="w", text="Industrial Alarm Console", font=("Helvetica", 10), fill="#dff3ff")
 
-    @staticmethod
-    def _lerp_color(a, b, t):
-        # linear interpolate hex colors a->b
-        a = a.lstrip("#"); b = b.lstrip("#")
-        ar = int(a[0:2],16); ag = int(a[2:4],16); ab = int(a[4:6],16)
-        br = int(b[0:2],16); bg = int(b[2:4],16); bb = int(b[4:6],16)
-        rr = int(ar + (br-ar)*t); rg = int(ag + (bg-ag)*t); rb = int(ab + (bb-ab)*t)
-        return f"#{rr:02x}{rg:02x}{rb:02x}"
-
-    def _led_render(self, active):
-        # Update layered glow + inner color to simulate a realistic indicator
-        cvs = self.led_canvas
-        # pulse when active
+    def _led_update(self, active):
+        # Pulsing glow when active
+        canvas = self.led_canvas
+        phase = self.led_pulse_phase
         if active:
+            # pulse between 0.4 and 0.9
             import math
-            self._led_phase += 0.25
-            pulse = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(self._led_phase))
-            # adjust layers' colors by creating lighter shades
-            shades = [
-                self._shade("#061a1a", pulse*0.6),
-                self._shade("#083232", pulse*0.45),
-                self._shade("#0b4a46", pulse*0.35)
-            ]
-            for item, col in zip(self._led_glow_layers, shades):
-                cvs.itemconfig(item, fill=col)
-            # inner red for alarm
-            cvs.itemconfig(self._led_inner, fill="#ff4d4d", outline="#b32f2f")
-            cvs.itemconfig(self._led_sheen, fill="#ffffff22")
+            pulse = 0.6 + 0.4 * (0.5 + 0.5 * math.sin(phase))
+            outer = int(60 * pulse)  # not used directly, but adjust color
+            glow_color = "#ff6b6b"
+            inner_color = "#ff4d4d"
+            canvas.itemconfig(self._led_circle, fill=inner_color, outline="#cc2f2f")
+            # simulate glow by drawing a translucent oval behind (approx via color alpha not supported -> use lighter colors)
+            canvas.itemconfig(self._led_glow_big, fill="", outline="")
+            canvas.itemconfig(self._led_glow_mid, fill="", outline="")
         else:
-            # quiet green
-            for i, item in enumerate(self._led_glow_layers):
-                cvs.itemconfig(item, fill=["#061212","#07201a","#0b3a2f"][i])
-            cvs.itemconfig(self._led_inner, fill="#2ecc71", outline="#1e8f53")
-            cvs.itemconfig(self._led_sheen, fill="#ffffff15")
-
-    @staticmethod
-    def _shade(hexcolor, factor):
-        # darken or lighten hexcolor by factor in [-1..1], positive -> lighten
-        hexcolor = hexcolor.lstrip("#")
-        r = int(hexcolor[0:2],16); g = int(hexcolor[2:4],16); b = int(hexcolor[4:6],16)
-        def clip(x): return max(0, min(255, int(x)))
-        if factor >= 0:
-            r = clip(r + (255 - r) * factor)
-            g = clip(g + (255 - g) * factor)
-            b = clip(b + (255 - b) * factor)
-        else:
-            r = clip(r * (1 + factor))
-            g = clip(g * (1 + factor))
-            b = clip(b * (1 + factor))
-        return f"#{r:02x}{g:02x}{b:02x}"
+            canvas.itemconfig(self._led_circle, fill="#2ecc71", outline="#1e8f53")
+            canvas.itemconfig(self._led_glow_big, fill="", outline="")
+            canvas.itemconfig(self._led_glow_mid, fill="", outline="")
+        self.led_pulse_phase += 0.3
 
     def simulate_alarm(self):
         add_history("Alarm (simulated) gestartet via GUI")
@@ -590,8 +557,10 @@ class AlarmGUI:
         with _state_lock:
             active = alarm_active
         self.status_var.set("Status: ALARM" if active else "Status: Ready")
-        self._led_render(active)
+        # update led glow/pulse
+        self._led_update(active)
 
+        # audio state
         with audio_playing_lock:
             ap = audio_playing
         self.audio_var.set(f"Audio: {'Playing' if ap else 'Stopped'}")
@@ -606,13 +575,18 @@ class AlarmGUI:
             except Exception:
                 pass
 
+        # schedule next update
         if not _stop_event.is_set():
             self.root.after(150, self.update_ui)
 
     def update_history(self):
-        self.history_list.delete(0, tk.END)
+        # sync history to treeview
+        cur_items = self.history_tv.get_children()
+        # clear and reinsert (keeps simple)
+        for it in cur_items:
+            self.history_tv.delete(it)
         for ts, ev in list(history)[:200]:
-            self.history_list.insert(tk.END, f"{ts}  •  {ev}")
+            self.history_tv.insert("", "end", values=(ts, ev))
         if not _stop_event.is_set():
             self.root.after(1000, self.update_history)
 
@@ -622,7 +596,7 @@ class AlarmGUI:
             self.mp3_var.set(path)
 
     def save_settings(self):
-        global ALARM_MP3, config
+        global ALARM_MP3, VOLUME_PERCENT, config
         ALARM_MP3 = self.mp3_var.get()
         config["ALARM_MP3"] = ALARM_MP3
         save_config(config)
