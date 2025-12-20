@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
-# v8 - Visuell verbessertes Design (moderner, "industrial" / Siemens-like)
-# - modernes Farbschema, Gradient-Header, LED-Glow/Puls, größere typografische Hierarchie
-# - History als Treeview, schlanke Settings, Tastenkürzel
-# - Beibehaltung der Funktionalität: AudioWorker, AlarmController, MockGPIO, Config
-#
-# Voraussetzungen:
-# - audio.py (SoundPlayer) im selben Verzeichnis
-# - Tkinter (python3-tk)
-# - Optional: amixer für systemweite Lautstärke (ALS A)
-#
-# Hinweis: Diese Datei ersetzt main.py — UI-Änderungen sind rückwärtskompatibel.
-
+# v10-fix2 - Fix: header draw + robustere Audio-Play-Fehlerbehandlung
+# (Beinhaltet vorheriges v10-Design + Fehlerbehebungen)
 import os
 import signal
 import time
@@ -21,24 +11,29 @@ import json
 from collections import deque
 from datetime import datetime
 import subprocess
+import sys
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font
 
-# Versuche RPi.GPIO zu importieren, ansonsten Simulation (nützlich für Entwicklung)
+# Versuche RPi.GPIO zu importieren, ansonsten Simulation
 try:
     import RPi.GPIO as GPIO  # type: ignore
     IS_RPI = True
 except Exception:
     IS_RPI = False
 
-from audio import SoundPlayer
+# Lokaler Audio-Player (vom Projekt)
+try:
+    from audio import SoundPlayer
+except Exception:
+    SoundPlayer = None  # defensive fallback
 
 # --- Logging --------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-LOG = logging.getLogger("easytec-alarm-gui")
+LOG = logging.getLogger("easytec-alarm")
 
-# --- Config / Globals ----------------------------------------------------
+# --- Configuration -------------------------------------------------------
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 
@@ -49,37 +44,41 @@ DEFAULT_CONFIG = {
     "SIMULATE_GPIO": not IS_RPI
 }
 
+
 def load_config():
     cfg = DEFAULT_CONFIG.copy()
     try:
         if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r") as f:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            cfg.update(data)
+            if isinstance(data, dict):
+                cfg.update(data)
     except Exception:
-        LOG.exception("Fehler beim Laden der Konfiguration, verwende Defaults.")
+        LOG.exception("Fehler beim Laden der Konfiguration - verwende Defaults")
     return cfg
+
 
 def save_config(cfg):
     try:
-        with open(CONFIG_PATH, "w") as f:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
     except Exception:
         LOG.exception("Fehler beim Speichern der Konfiguration")
 
+
 config = load_config()
-ALARM_MP3 = config["ALARM_MP3"]
-SOUND_DEVICE = config["SOUND_DEVICE"]
-VOLUME_PERCENT = int(config.get("VOLUME_PERCENT", 80))
-SIMULATE_GPIO = bool(config.get("SIMULATE_GPIO", not IS_RPI))
+ALARM_MP3 = config.get("ALARM_MP3", DEFAULT_CONFIG["ALARM_MP3"])
+SOUND_DEVICE = config.get("SOUND_DEVICE", DEFAULT_CONFIG["SOUND_DEVICE"])
+VOLUME_PERCENT = int(config.get("VOLUME_PERCENT", DEFAULT_CONFIG["VOLUME_PERCENT"]))
+SIMULATE_GPIO = bool(config.get("SIMULATE_GPIO", DEFAULT_CONFIG["SIMULATE_GPIO"]))
 
 # --- GPIO pins (BOARD numbering) ------------------------------------------
-PIN_output_BUZ = 18  # Buzzer (Output)
-PIN_output_LED = 16  # LED (Output)
-PIN_b_alarm = 36     # Alarm button (Input)
-PIN_b_reset = 37     # Reset button (Input)
+PIN_OUTPUT_BUZ = 18
+PIN_OUTPUT_LED = 16
+PIN_BTN_ALARM = 36
+PIN_BTN_RESET = 37
 
-# --- Mock GPIO for non-RPi / Testing -------------------------------------
+# --- Mock GPIO ------------------------------------------------------------
 class MockGPIO:
     BOARD = "BOARD"
     IN = "IN"
@@ -91,10 +90,10 @@ class MockGPIO:
     def __init__(self):
         self._pins = {}
         self._inputs = {}
-        LOG.info("MockGPIO initialisiert (Simulation)")
+        LOG.info("MockGPIO aktiviert (Simulationsmodus)")
 
-    def setmode(self, m):
-        LOG.debug("MockGPIO setmode(%s)", m)
+    def setmode(self, mode):
+        LOG.debug("MockGPIO.setmode(%s)", mode)
 
     def setwarnings(self, flag):
         pass
@@ -110,36 +109,45 @@ class MockGPIO:
     def output(self, pin, value):
         if pin in self._pins:
             self._pins[pin]["state"] = value
-        LOG.debug("MockGPIO output pin=%s value=%s", pin, value)
+        LOG.debug("MockGPIO.output pin=%s value=%s", pin, value)
 
     def cleanup(self):
-        LOG.info("MockGPIO cleanup")
+        LOG.info("MockGPIO.cleanup")
 
+    # Hilfsmethode für Tests
     def set_input(self, pin, value):
         self._inputs[pin] = value
 
 # Wähle GPIO-Implementierung
 if IS_RPI and not SIMULATE_GPIO:
-    GPIO.setmode(GPIO.BOARD)
-    GPIO.setwarnings(False)
+    try:
+        GPIO.setmode(GPIO.BOARD)
+        GPIO.setwarnings(False)
+    except Exception:
+        LOG.exception("GPIO-Init fehlgeschlagen - wechsle zu MockGPIO")
+        GPIO = MockGPIO()
+        SIMULATE_GPIO = True
 else:
     GPIO = MockGPIO()
     SIMULATE_GPIO = True
 
-# Setup pins (sicher in try/except)
+# Setup Pins sicher
 try:
-    GPIO.setup(PIN_output_BUZ, GPIO.OUT)
-    GPIO.setup(PIN_output_LED, GPIO.OUT)
-    GPIO.setup(PIN_b_alarm, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-    GPIO.setup(PIN_b_reset, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-    GPIO.output(PIN_output_BUZ, GPIO.LOW)
-    GPIO.output(PIN_output_LED, GPIO.LOW)
+    GPIO.setup(PIN_OUTPUT_BUZ, GPIO.OUT)
+    GPIO.setup(PIN_OUTPUT_LED, GPIO.OUT)
+    GPIO.setup(PIN_BTN_ALARM, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    GPIO.setup(PIN_BTN_RESET, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    try:
+        GPIO.output(PIN_OUTPUT_BUZ, GPIO.LOW)
+        GPIO.output(PIN_OUTPUT_LED, GPIO.LOW)
+    except Exception:
+        pass
 except Exception:
-    LOG.exception("Fehler beim Initialisieren der GPIO-Pins (Fortsetzen im Simulationsmodus)")
+    LOG.exception("Fehler beim Konfigurieren der GPIO-Pins")
 
-# --- Threading primitives -----------------------------------------------
-alarm_active = False
+# --- Threading & State ---------------------------------------------------
 _state_lock = threading.Lock()
+alarm_active = False
 
 audio_cmd_q = queue.Queue()
 _stop_event = threading.Event()
@@ -148,38 +156,64 @@ audio_playing = False
 audio_playing_lock = threading.Lock()
 
 history = deque(maxlen=500)
-def add_history(entry):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    history.appendleft((ts, entry))
-    LOG.info(entry)
 
-# --- System volume helper (amixer) ---------------------------------------
+
+def add_history(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history.appendleft((ts, msg))
+    LOG.info(msg)
+
+# --- Volume helper -------------------------------------------------------
 def set_system_volume(percent: int):
     try:
         percent = max(0, min(100, int(percent)))
-        subprocess.run(["amixer", "sset", "PCM", f"{percent}%"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        LOG.info("Set system volume to %d%%", percent)
+        # Versuche ALSA amixer
+        subprocess.run(["amixer", "sset", "PCM", f"{percent}%"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        LOG.info("System volume gesetzt: %d%%", percent)
     except Exception:
-        LOG.debug("amixer not available or failed to set volume.")
+        LOG.debug("amixer nicht verfügbar oder Fehler beim Setzen der Lautstärke")
+
 
 set_system_volume(VOLUME_PERCENT)
 
-# --- Audio worker thread --------------------------------------------------
+# --- AudioWorker ---------------------------------------------------------
 class AudioWorker(threading.Thread):
-    def __init__(self, cmd_queue: queue.Queue, device: str = None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.daemon = True
+    def __init__(self, cmd_queue: queue.Queue, device: str = None):
+        super().__init__(daemon=True)
         self.cmd_queue = cmd_queue
         self.device = device
         self.player = None
 
+    def _safe_play(self, filepath):
+        """
+        Versucht player.play mit verschiedenen Signaturen, loggt Fehler, beendet sauber.
+        """
+        try:
+            # erster Versuch: gängige Signatur mit interrupt
+            self.player.play(filepath, interrupt=True)
+        except TypeError:
+            # play existiert, aber Signatur unterscheidet sich -> versuch ohne interrupt
+            try:
+                self.player.play(filepath)
+            except Exception:
+                LOG.exception("Fehler beim Abspielen (fallback ohne interrupt)")
+        except AttributeError:
+            LOG.exception("Player hat keine 'play' Methode")
+        except Exception:
+            LOG.exception("Fehler beim Abspielen der Datei")
+
     def run(self):
         global audio_playing
-        LOG.info("AudioWorker startet, device=%s", self.device or "<auto>")
-        try:
-            self.player = SoundPlayer(device=self.device)
-        except Exception:
-            LOG.exception("Fehler beim Initialisieren des SoundPlayers")
+        LOG.info("AudioWorker startet (device=%s)", self.device or "<auto>")
+        if SoundPlayer is not None:
+            try:
+                self.player = SoundPlayer(device=self.device)
+            except Exception:
+                LOG.exception("SoundPlayer-Initialisierung fehlgeschlagen")
+                self.player = None
+        else:
+            LOG.warning("Kein SoundPlayer verfügbar - Audio-Funktionen deaktiviert")
             self.player = None
 
         while not _stop_event.is_set():
@@ -196,356 +230,417 @@ class AudioWorker(threading.Thread):
                     continue
                 if self.player:
                     try:
-                        LOG.info("Spiele Alarm: %s", filepath)
                         with audio_playing_lock:
                             audio_playing = True
-                        self.player.play(filepath, interrupt=True)
-                        with audio_playing_lock:
-                            audio_playing = False
-                        LOG.info("Audio fertig")
-                    except Exception:
-                        LOG.exception("Fehler beim Abspielen")
+                        LOG.info("Spiele: %s", filepath)
+                        self._safe_play(filepath)
+                    finally:
                         with audio_playing_lock:
                             audio_playing = False
                 else:
-                    LOG.error("Kein funktionierender Player vorhanden.")
+                    LOG.error("Kein Player vorhanden")
                     add_history("Audio: Kein Player vorhanden")
             elif cmd == "stop":
                 if self.player:
                     try:
-                        LOG.info("Audio Stop angefordert")
-                        self.player.stop()
+                        # einige Player haben stop(), andere nicht
+                        stop_fn = getattr(self.player, "stop", None)
+                        if callable(stop_fn):
+                            stop_fn()
+                            LOG.info("Audio gestoppt")
                     except Exception:
-                        LOG.exception("Fehler beim Stoppen der Audioausgabe")
+                        LOG.exception("Fehler beim Stoppen")
                 with audio_playing_lock:
                     audio_playing = False
                 add_history("Audio: gestoppt")
             elif cmd == "set_volume":
                 try:
                     set_system_volume(int(arg))
-                    add_history(f"Volume eingestellt: {arg}%")
+                    add_history(f"Lautstärke gesetzt: {arg}%")
                 except Exception:
                     LOG.exception("Fehler beim Setzen der Lautstärke")
             elif cmd == "exit":
-                LOG.info("AudioWorker - exit erhalten")
+                LOG.info("AudioWorker: exit")
                 break
 
+        # Cleanup
         if self.player:
             try:
-                self.player.stop()
+                stop_fn = getattr(self.player, "stop", None)
+                if callable(stop_fn):
+                    stop_fn()
             except Exception:
                 pass
         with audio_playing_lock:
             audio_playing = False
         LOG.info("AudioWorker beendet")
 
-# --- Alarm controller ----------------------------------------------------
+# --- AlarmController -----------------------------------------------------
 class AlarmController:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def trigger_alarm(self, source="external"):
+    def trigger(self, source="external"):
         global alarm_active
         with self._lock:
             with _state_lock:
                 if alarm_active:
-                    LOG.debug("Alarm bereits aktiv, ignoriere weiteren Trigger")
+                    LOG.debug("Alarm bereits aktiv - Ignoriere Trigger")
                     add_history("Alarm-Trigger ignoriert (bereits aktiv)")
                     return
                 alarm_active = True
             add_history(f"Alarm ausgelöst ({source})")
             try:
-                GPIO.output(PIN_output_BUZ, GPIO.HIGH)
-                GPIO.output(PIN_output_LED, GPIO.HIGH)
+                GPIO.output(PIN_OUTPUT_BUZ, GPIO.HIGH)
+                GPIO.output(PIN_OUTPUT_LED, GPIO.HIGH)
             except Exception:
-                LOG.exception("GPIO output failed on trigger")
+                LOG.exception("GPIO write failed on trigger")
             audio_cmd_q.put(("play", ALARM_MP3))
-            threading.Thread(target=self._alarm_wait_for_reset, daemon=True).start()
+            threading.Thread(target=self._wait_for_reset, daemon=True).start()
 
-    def _alarm_wait_for_reset(self):
+    def _wait_for_reset(self):
         press_count = 0
         try:
             while not _stop_event.is_set():
-                if GPIO.input(PIN_b_reset) == GPIO.HIGH:
+                if GPIO.input(PIN_BTN_RESET) == GPIO.HIGH:
                     time.sleep(0.05)
-                    if GPIO.input(PIN_b_reset) == GPIO.HIGH:
+                    if GPIO.input(PIN_BTN_RESET) == GPIO.HIGH:
                         press_count += 1
-                        add_history(f"Reset-Knopf gedrückt ({press_count})")
-                        while GPIO.input(PIN_b_reset) == GPIO.HIGH and not _stop_event.is_set():
+                        add_history(f"Reset-Taste gedrückt ({press_count})")
+                        # warte bis losgelassen
+                        while GPIO.input(PIN_BTN_RESET) == GPIO.HIGH and not _stop_event.is_set():
                             time.sleep(0.05)
                         if press_count == 1:
                             self.mute()
-                            add_history("Alarm: gemuted (erster Druck)")
+                            add_history("Aktion: Mute (1. Druck)")
                         elif press_count >= 2:
                             self.reset()
-                            add_history("Alarm: reset (zweiter Druck)")
+                            add_history("Aktion: Reset (2. Druck)")
                             break
                 time.sleep(0.1)
         except Exception:
-            LOG.exception("Fehler im Alarm-Handler")
+            LOG.exception("Fehler im Alarm-Wait-Handler")
             self.reset()
 
     def mute(self):
         try:
-            GPIO.output(PIN_output_BUZ, GPIO.LOW)
+            GPIO.output(PIN_OUTPUT_BUZ, GPIO.LOW)
         except Exception:
-            LOG.exception("Fehler beim Setzen des Buzzers")
+            LOG.exception("Fehler beim Deaktivieren des Buzzers")
         audio_cmd_q.put(("stop", None))
-        add_history("Aktion: Mute")
+        add_history("Aktion: Mute (GUI/Hardware)")
 
     def reset(self):
         global alarm_active
         audio_cmd_q.put(("stop", None))
         try:
-            GPIO.output(PIN_output_BUZ, GPIO.LOW)
-            GPIO.output(PIN_output_LED, GPIO.LOW)
+            GPIO.output(PIN_OUTPUT_BUZ, GPIO.LOW)
+            GPIO.output(PIN_OUTPUT_LED, GPIO.LOW)
         except Exception:
             LOG.exception("Fehler beim Setzen der Ausgänge")
         with _state_lock:
             alarm_active = False
         add_history("Aktion: Reset - System reaktiviert")
 
+
 alarm_ctrl = AlarmController()
 
-# --- Status light thread --------------------------------------------------
-def status_light_loop():
+# --- Background threads --------------------------------------------------
+def status_led_loop():
     while not _stop_event.is_set():
         with _state_lock:
             active = alarm_active
         if active:
             try:
-                GPIO.output(PIN_output_LED, GPIO.HIGH)
+                GPIO.output(PIN_OUTPUT_LED, GPIO.HIGH)
             except Exception:
                 pass
             time.sleep(0.5)
             continue
+        # Blinken im Idle
         try:
-            GPIO.output(PIN_output_LED, GPIO.HIGH)
-            time.sleep(0.1)
-            GPIO.output(PIN_output_LED, GPIO.LOW)
+            GPIO.output(PIN_OUTPUT_LED, GPIO.HIGH)
+            time.sleep(0.12)
+            GPIO.output(PIN_OUTPUT_LED, GPIO.LOW)
         except Exception:
             pass
-        for _ in range(100):
+        for _ in range(30):
             if _stop_event.is_set():
                 break
             time.sleep(0.1)
 
-# --- Main loop (Überwacht Alarm-Knopf) -----------------------------------
-def main_loop():
-    LOG.info("System ready (Button-Überwachung läuft)... (SIM=%s)", SIMULATE_GPIO)
+
+def monitor_alarm_button():
     while not _stop_event.is_set():
         try:
-            if GPIO.input(PIN_b_alarm) == GPIO.HIGH:
-                LOG.info("Hardware Alarm-Knopf gedrückt")
+            if GPIO.input(PIN_BTN_ALARM) == GPIO.HIGH:
                 time.sleep(0.05)
-                if GPIO.input(PIN_b_alarm) == GPIO.HIGH:
-                    alarm_ctrl.trigger_alarm(source="hardware-button")
-                    while GPIO.input(PIN_b_alarm) == GPIO.HIGH and not _stop_event.is_set():
+                if GPIO.input(PIN_BTN_ALARM) == GPIO.HIGH:
+                    add_history("Hardware-Alarm-Taste gedrückt")
+                    alarm_ctrl.trigger(source="hardware-button")
+                    # wait until released
+                    while GPIO.input(PIN_BTN_ALARM) == GPIO.HIGH and not _stop_event.is_set():
                         time.sleep(0.05)
             time.sleep(0.1)
         except Exception:
-            LOG.exception("Fehler in main_loop")
+            LOG.exception("Fehler in monitor_alarm_button")
             time.sleep(0.5)
 
-# --- UI: enhanced design -------------------------------------------------
-class BeautifulStyle:
-    # Farbpalette (Siemens-like, industrial & calm)
-    BG = "#f2f6f9"
-    ACCENT = "#0b5e88"       # deep teal / corporate
-    ACCENT2 = "#1f7fb0"
-    DANGER = "#c0392b"
-    WARNING = "#f39c12"
-    SUCCESS = "#27ae60"
-    CARD = "#ffffff"
-    MUTED = "#6b7a86"
+# --- UI / Theme -----------------------------------------------------------
+class DarkIndustrial:
+    BG = "#0e1113"
+    PANEL = "#151719"
+    CARD = "#1b1f22"
+    ACCENT = "#0078a8"
+    DANGER = "#d94d4d"
+    SUCCESS = "#2fb36b"
+    TEXT = "#e6eef3"
+    MUTED = "#94a3ad"
 
     @staticmethod
-    def apply(root, style: ttk.Style):
-        root.configure(background=BeautifulStyle.BG)
+    def apply(root: tk.Tk, style: ttk.Style):
+        root.configure(bg=DarkIndustrial.BG)
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure("App.TFrame", background=BeautifulStyle.BG)
-        style.configure("Card.TFrame", background=BeautifulStyle.CARD, relief="flat", borderwidth=0)
-        style.configure("Header.TLabel", background=BeautifulStyle.BG, foreground=BeautifulStyle.ACCENT, font=("Helvetica", 24, "bold"))
-        style.configure("SubHeader.TLabel", background=BeautifulStyle.BG, foreground=BeautifulStyle.MUTED, font=("Helvetica", 10))
-        style.configure("Accent.TButton", foreground="white", background=BeautifulStyle.ACCENT, font=("Helvetica", 14, "bold"))
-        style.map("Accent.TButton", background=[("active", BeautifulStyle.ACCENT2)])
-        style.configure("Danger.TButton", foreground="white", background=BeautifulStyle.DANGER, font=("Helvetica", 14, "bold"))
-        style.configure("Success.TButton", foreground="white", background=BeautifulStyle.SUCCESS, font=("Helvetica", 14, "bold"))
-        style.configure("Warning.TButton", foreground="black", background=BeautifulStyle.WARNING, font=("Helvetica", 12, "bold"))
-        style.configure("History.Treeview", background=BeautifulStyle.CARD, fieldbackground=BeautifulStyle.CARD)
+        style.configure("TFrame", background=DarkIndustrial.BG)
+        style.configure("Card.TFrame", background=DarkIndustrial.CARD, relief="flat")
+        style.configure("TLabel", background=DarkIndustrial.BG, foreground=DarkIndustrial.TEXT)
+        style.configure("TButton", background=DarkIndustrial.PANEL, foreground=DarkIndustrial.TEXT)
 
-class AlarmGUI:
-    def __init__(self, root):
+# --- Main GUI ------------------------------------------------------------
+class AlarmApp:
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("EasyTec Alarm · Professional")
-        self.root.attributes("-fullscreen", True)
+        self.root.title("EasyTec Alarm Console")
+        # Try fullscreen, but handle platforms that forbid it
+        try:
+            self.root.attributes("-fullscreen", True)
+        except Exception:
+            pass
         try:
             self.root.config(cursor="none")
         except Exception:
             pass
 
         self.style = ttk.Style()
-        BeautifulStyle.apply(self.root, self.style)
+        DarkIndustrial.apply(self.root, self.style)
 
-        # Fonts
-        self.title_font = font.Font(family="Helvetica", size=28, weight="bold")
-        self.big_font = font.Font(family="Helvetica", size=20, weight="bold")
-        self.medium_font = font.Font(family="Helvetica", size=12)
-        self.small_font = font.Font(family="Helvetica", size=10)
+        # fonts
+        self.h1 = font.Font(family="Segoe UI", size=22, weight="bold")
+        self.h2 = font.Font(family="Segoe UI", size=14, weight="bold")
+        self.normal = font.Font(family="Segoe UI", size=11)
 
-        # Top-level layout: header, content
-        self.header_canvas = tk.Canvas(root, height=110, highlightthickness=0)
-        self.header_canvas.pack(fill="x")
-        self._draw_header()
+        # layout
+        header = tk.Frame(self.root, bg=DarkIndustrial.PANEL, height=80)
+        header.pack(fill="x")
+        # robust header drawing
+        try:
+            self._draw_header(header)
+        except Exception:
+            LOG.exception("Header-Drawing fehlgeschlagen (fortfahren ohne Header)")
 
-        content = ttk.Frame(root, style="App.TFrame", padding=18)
-        content.pack(fill="both", expand=True)
+        body = tk.Frame(self.root, bg=DarkIndustrial.BG, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
 
-        left = ttk.Frame(content, style="App.TFrame")
+        left = tk.Frame(body, bg=DarkIndustrial.BG)
         left.pack(side="left", fill="both", expand=True)
 
-        right = ttk.Frame(content, width=360, style="App.TFrame")
+        right = tk.Frame(body, bg=DarkIndustrial.BG, width=360)
         right.pack(side="right", fill="y")
 
-        # Big status card
-        status_card = ttk.Frame(left, style="Card.TFrame", padding=20)
-        status_card.pack(fill="both", expand=True, padx=(0,12))
+        # main status card
+        card = tk.Frame(left, bg=DarkIndustrial.CARD, bd=0)
+        card.pack(fill="both", expand=True, padx=(0,12), pady=6)
 
-        # Status title+subtitle
-        title = ttk.Label(status_card, text="SYSTEM STATUS", style="Header.TLabel")
-        title.pack(anchor="w")
-        subtitle = ttk.Label(status_card, text="Industrial Alarm Interface · Ready for deployment", style="SubHeader.TLabel")
-        subtitle.pack(anchor="w", pady=(0,10))
+        # top labels
+        tk.Label(card, text="SYSTEM STATUS", font=self.h1, fg=DarkIndustrial.ACCENT, bg=DarkIndustrial.CARD).pack(anchor="w", padx=18, pady=(18,0))
+        tk.Label(card, text="Industrial Alarm Console · Ready", font=self.normal, fg=DarkIndustrial.MUTED, bg=DarkIndustrial.CARD).pack(anchor="w", padx=18, pady=(2,12))
 
-        # Main status row
-        status_row = ttk.Frame(status_card, style="Card.TFrame")
-        status_row.pack(fill="x", pady=(6,14))
+        # status area
+        status_row = tk.Frame(card, bg=DarkIndustrial.CARD)
+        status_row.pack(fill="x", padx=18, pady=(6,12))
 
-        # LED canvas with glow
-        self.led_canvas = tk.Canvas(status_row, width=120, height=120, highlightthickness=0, bg=BeautifulStyle.CARD)
+        # realistic LED
+        self.led_canvas = tk.Canvas(status_row, width=160, height=160, bg=DarkIndustrial.CARD, highlightthickness=0)
         self.led_canvas.pack(side="left", padx=(0,18))
-        # Glow layers
-        self._led_glow_big = self.led_canvas.create_oval(6,6,114,114, fill="", outline="")
-        self._led_glow_mid = self.led_canvas.create_oval(18,18,102,102, fill="", outline="")
-        self._led_circle = self.led_canvas.create_oval(34,34,86,86, fill="#2ecc71", outline="#1e8f53", width=2)
+        self._create_led_art()
 
-        # Status text
-        status_text_frame = ttk.Frame(status_row, style="Card.TFrame")
-        status_text_frame.pack(fill="both", expand=True)
+        # text block
+        txt = tk.Frame(status_row, bg=DarkIndustrial.CARD)
+        txt.pack(fill="both", expand=True)
         self.status_var = tk.StringVar(value="Status: Initializing...")
-        self.status_label = ttk.Label(status_text_frame, textvariable=self.status_var, font=self.big_font, background=BeautifulStyle.CARD)
-        self.status_label.pack(anchor="w")
+        tk.Label(txt, textvariable=self.status_var, font=self.h2, fg=DarkIndustrial.TEXT, bg=DarkIndustrial.CARD).pack(anchor="w")
         self.detail_var = tk.StringVar(value="Letzte Aktion: —")
-        self.detail_label = ttk.Label(status_text_frame, textvariable=self.detail_var, font=self.medium_font, foreground=BeautifulStyle.MUTED, background=BeautifulStyle.CARD)
-        self.detail_label.pack(anchor="w", pady=(6,0))
+        tk.Label(txt, textvariable=self.detail_var, font=self.normal, fg=DarkIndustrial.MUTED, bg=DarkIndustrial.CARD).pack(anchor="w", pady=(6,0))
 
-        # Progress / audio indicator
+        # audio info
         self.audio_var = tk.StringVar(value="Audio: Stopped")
-        self.audio_label = ttk.Label(status_card, textvariable=self.audio_var, font=self.medium_font, background=BeautifulStyle.CARD)
-        self.audio_label.pack(anchor="w")
-        self.progress = ttk.Progressbar(status_card, orient="horizontal", mode="indeterminate")
-        self.progress.pack(fill="x", pady=(8,0))
+        tk.Label(card, textvariable=self.audio_var, bg=DarkIndustrial.CARD, fg=DarkIndustrial.TEXT, font=self.normal).pack(anchor="w", padx=18)
+        self.progress = ttk.Progressbar(card, orient="horizontal", mode="indeterminate")
+        self.progress.pack(fill="x", padx=18, pady=(8,12))
 
-        # Action buttons styled big
-        actions = ttk.Frame(status_card, style="Card.TFrame", padding=(0,10))
-        actions.pack(fill="x")
-        self.btn_simulate = tk.Button(actions, text=" 🔔  Simulate Alarm", bg=BeautifulStyle.DANGER, fg="white", bd=0, font=self.medium_font, activebackground="#e74c3c", command=self.simulate_alarm)
-        self.btn_simulate.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
-        self.btn_mute = tk.Button(actions, text=" 🔇  Mute", bg="#f39c12", fg="black", bd=0, font=self.medium_font, command=self.gui_mute)
-        self.btn_mute.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
-        self.btn_reset = tk.Button(actions, text=" ✅  Reset", bg=BeautifulStyle.SUCCESS, fg="white", bd=0, font=self.medium_font, command=self.gui_reset)
-        self.btn_reset.pack(side="left", padx=6, ipadx=12, ipady=12, expand=True, fill="x")
+        # big action buttons
+        btn_row = tk.Frame(card, bg=DarkIndustrial.CARD)
+        btn_row.pack(fill="x", padx=18, pady=(6,18))
+        self.btn_alarm = tk.Button(btn_row, text="  🔔  ALARM  ", bg=DarkIndustrial.DANGER, fg="white", bd=0, font=self.h2, command=self.on_simulate)
+        self.btn_alarm.pack(side="left", expand=True, fill="x", padx=6, ipadx=4, ipady=12)
+        self.btn_mute = tk.Button(btn_row, text="  🔇  MUTE  ", bg="#b87e2a", fg="black", bd=0, font=self.normal, command=self.on_mute)
+        self.btn_mute.pack(side="left", expand=True, fill="x", padx=6, ipadx=4, ipady=12)
+        self.btn_reset = tk.Button(btn_row, text="  ✔  RESET  ", bg=DarkIndustrial.SUCCESS, fg="white", bd=0, font=self.normal, command=self.on_reset)
+        self.btn_reset.pack(side="left", expand=True, fill="x", padx=6, ipadx=4, ipady=12)
 
-        # Compact settings bar
-        settings_bar = ttk.Frame(left, style="Card.TFrame")
-        settings_bar.pack(fill="x", pady=(14,0))
-        ttk.Label(settings_bar, text="Alarm MP3", font=self.small_font, background=BeautifulStyle.BG).pack(side="left", padx=(0,6))
+        # settings row
+        settings = tk.Frame(left, bg=DarkIndustrial.CARD)
+        settings.pack(fill="x", padx=18, pady=(6,12))
+        tk.Label(settings, text="Alarm MP3", bg=DarkIndustrial.CARD, fg=DarkIndustrial.MUTED, font=self.normal).pack(side="left")
         self.mp3_var = tk.StringVar(value=ALARM_MP3)
-        ttk.Entry(settings_bar, textvariable=self.mp3_var, width=48).pack(side="left", padx=6)
-        ttk.Button(settings_bar, text="Browse", command=self.browse_mp3).pack(side="left", padx=6)
-        ttk.Button(settings_bar, text="Save", command=self.save_settings).pack(side="left", padx=6)
+        ent = tk.Entry(settings, textvariable=self.mp3_var, width=56, bg="#0f1417", fg=DarkIndustrial.TEXT, insertbackground=DarkIndustrial.TEXT)
+        ent.pack(side="left", padx=8)
+        tk.Button(settings, text="Browse", command=self.browse_mp3, bg=DarkIndustrial.PANEL, fg=DarkIndustrial.TEXT, bd=0).pack(side="left", padx=6)
+        tk.Button(settings, text="Save", command=self.save_settings, bg=DarkIndustrial.PANEL, fg=DarkIndustrial.TEXT, bd=0).pack(side="left", padx=6)
 
-        # Right column: history + quick toggles
-        title_h = ttk.Label(right, text="Event History", font=self.medium_font, background=BeautifulStyle.BG)
-        title_h.pack(anchor="w", padx=6, pady=(6,0))
+        # right column: History & quick
+        tk.Label(right, text="Event History", bg=DarkIndustrial.BG, fg=DarkIndustrial.MUTED, font=self.normal).pack(anchor="w", padx=8, pady=(6,0))
+        self.history_lv = tk.Listbox(right, bg="#0f1417", fg=DarkIndustrial.TEXT, borderwidth=0)
+        self.history_lv.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # Treeview for history (time, event)
-        self.history_tv = ttk.Treeview(right, columns=("time", "event"), show="headings", height=18, style="History.Treeview")
-        self.history_tv.heading("time", text="Time")
-        self.history_tv.heading("event", text="Event")
-        self.history_tv.column("time", width=120, anchor="w")
-        self.history_tv.column("event", width=220, anchor="w")
-        self.history_tv.pack(fill="both", expand=True, padx=6, pady=6)
+        quick = tk.Frame(right, bg=DarkIndustrial.BG)
+        quick.pack(fill="x", padx=8, pady=(0,12))
+        tk.Button(quick, text="LED ON", command=self.force_led_on, bg=DarkIndustrial.PANEL, fg=DarkIndustrial.TEXT, bd=0).pack(side="left", padx=6)
+        tk.Button(quick, text="LED OFF", command=self.force_led_off, bg=DarkIndustrial.PANEL, fg=DarkIndustrial.TEXT, bd=0).pack(side="left", padx=6)
+        tk.Button(quick, text="Exit", command=self.on_exit, bg=DarkIndustrial.PANEL, fg=DarkIndustrial.TEXT, bd=0).pack(side="right", padx=6)
 
-        # Quick controls
-        quick = ttk.Frame(right, style="App.TFrame")
-        quick.pack(fill="x", padx=6, pady=6)
-        ttk.Button(quick, text="LED On", command=self.force_led_on).pack(side="left", padx=4, ipadx=10)
-        ttk.Button(quick, text="LED Off", command=self.force_led_off).pack(side="left", padx=4, ipadx=10)
-        ttk.Button(quick, text="Toggle FS", command=self.toggle_fullscreen).pack(side="left", padx=4, ipadx=10)
+        # keyboard shortcuts
+        self.root.bind("<Escape>", lambda e: self.toggle_fullscreen())
+        self.root.bind("<Key-s>", lambda e: self.on_simulate())
+        self.root.bind("<Key-m>", lambda e: self.on_mute())
+        self.root.bind("<Key-r>", lambda e: self.on_reset())
 
-        # Bind keyboard shortcuts
-        root.bind("<Escape>", lambda e: self.toggle_fullscreen())
-        root.bind("m", lambda e: self.gui_mute())
-        root.bind("r", lambda e: self.gui_reset())
-        root.bind("s", lambda e: self.simulate_alarm())
+        # animation state
+        self._led_phase = 0.0
 
-        # UI update loops
-        self.led_pulse_phase = 0.0
+        # start ui loops
         self.update_ui()
-        self.root.after(700, self.update_history)
+        self.root.after(800, self.update_history)
 
-    def _draw_header(self):
-        c = self.header_canvas
-        w = c.winfo_reqwidth() or c.winfo_screenwidth()
-        h = 110
-        # Draw simple horizontal gradient (approximation)
-        c.create_rectangle(0, 0, w, h, fill="#0b5e88", outline="")
-        c.create_text(28, h/2, anchor="w", text=" EASYTEC", font=("Helvetica", 28, "bold"), fill="white")
-        c.create_text(28, h/2 + 30, anchor="w", text="Industrial Alarm Console", font=("Helvetica", 10), fill="#dff3ff")
+    # Header drawing (robust)
+    def _draw_header(self, parent):
+        try:
+            c = tk.Canvas(parent, height=90, bg=DarkIndustrial.PANEL, highlightthickness=0)
+            c.pack(fill="both", expand=True)
+            w = c.winfo_screenwidth() or 1024
+            h = 90
+            # simple horizontal gradient approximation
+            for i in range(0, h, 3):
+                t = i / max(1, h)
+                col = self._lerp_color("#0b2230", "#07202a", t)
+                c.create_rectangle(0, i, w, i + 3, fill=col, outline=col)
+            c.create_text(28, h / 2, anchor="w", text="EASYTEC", font=("Segoe UI", 26, "bold"), fill="#dff6ff")
+            c.create_text(28, h / 2 + 26, anchor="w", text="Industrial Alarm Console", font=("Segoe UI", 9), fill="#9fbfcf")
+        except Exception:
+            LOG.exception("Fehler in _draw_header")
 
-    def _led_update(self, active):
-        # Pulsing glow when active
-        canvas = self.led_canvas
-        phase = self.led_pulse_phase
+    @staticmethod
+    def _lerp_color(a, b, t):
+        a = a.lstrip("#"); b = b.lstrip("#")
+        ar = int(a[0:2], 16); ag = int(a[2:4], 16); ab = int(a[4:6], 16)
+        br = int(b[0:2], 16); bg = int(b[2:4], 16); bb = int(b[4:6], 16)
+        rr = int(ar + (br - ar) * t); rg = int(ag + (bg - ag) * t); rb = int(ab + (bb - ab) * t)
+        return f"#{rr:02x}{rg:02x}{rb:02x}"
+
+    def _create_led_art(self):
+        c = self.led_canvas
+        # base metallic ring
+        c.create_oval(6, 6, 154, 154, fill="#0f1213", outline="#2b2b2b", width=6)
+        c.create_oval(18, 18, 138, 138, fill="#0b1010", outline="#202426", width=2)
+        # glow layers
+        self._glow_items = [
+            c.create_oval(28, 28, 128, 128, fill="#081212", outline=""),
+            c.create_oval(36, 36, 120, 120, fill="#093030", outline=""),
+        ]
+        # center light
+        self._center = c.create_oval(46, 46, 110, 110, fill="#2ecc71", outline="#1e8f53", width=2)
+        self._sheen = c.create_arc(46, 30, 110, 86, start=20, extent=130, style="pieslice", fill="#ffffff15", outline="")
+
+    def _led_render(self, active: bool):
+        c = self.led_canvas
         if active:
-            # pulse between 0.4 and 0.9
             import math
-            pulse = 0.6 + 0.4 * (0.5 + 0.5 * math.sin(phase))
-            outer = int(60 * pulse)  # not used directly, but adjust color
-            glow_color = "#ff6b6b"
-            inner_color = "#ff4d4d"
-            canvas.itemconfig(self._led_circle, fill=inner_color, outline="#cc2f2f")
-            # simulate glow by drawing a translucent oval behind (approx via color alpha not supported -> use lighter colors)
-            canvas.itemconfig(self._led_glow_big, fill="", outline="")
-            canvas.itemconfig(self._led_glow_mid, fill="", outline="")
+            self._led_phase += 0.28
+            pulse = 0.6 + 0.35 * (0.5 + 0.5 * math.sin(self._led_phase))
+            glow1 = self._shade("#0b2b2b", pulse * 0.6)
+            glow2 = self._shade("#0f3a36", pulse * 0.45)
+            c.itemconfig(self._glow_items[0], fill=glow1)
+            c.itemconfig(self._glow_items[1], fill=glow2)
+            c.itemconfig(self._center, fill="#ff4d4d", outline="#b32f2f")
+            c.itemconfig(self._sheen, fill="#ffffff22")
         else:
-            canvas.itemconfig(self._led_circle, fill="#2ecc71", outline="#1e8f53")
-            canvas.itemconfig(self._led_glow_big, fill="", outline="")
-            canvas.itemconfig(self._led_glow_mid, fill="", outline="")
-        self.led_pulse_phase += 0.3
+            c.itemconfig(self._glow_items[0], fill="#081212")
+            c.itemconfig(self._glow_items[1], fill="#093030")
+            c.itemconfig(self._center, fill="#2ecc71", outline="#1e8f53")
+            c.itemconfig(self._sheen, fill="#ffffff10")
 
-    def simulate_alarm(self):
-        add_history("Alarm (simulated) gestartet via GUI")
+    @staticmethod
+    def _shade(hexcolor, factor):
+        hexcolor = hexcolor.lstrip("#")
+        r = int(hexcolor[0:2], 16); g = int(hexcolor[2:4], 16); b = int(hexcolor[4:6], 16)
+        def clip(x): return max(0, min(255, int(x)))
+        if factor >= 0:
+            r = clip(r + (255 - r) * factor)
+            g = clip(g + (255 - g) * factor)
+            b = clip(b + (255 - b) * factor)
+        else:
+            r = clip(r * (1 + factor)); g = clip(g * (1 + factor)); b = clip(b * (1 + factor))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    # UI actions
+    def on_simulate(self):
+        add_history("Alarm simuliert (GUI)")
         self.detail_var.set("Letzte Aktion: Simulierter Alarm")
-        alarm_ctrl.trigger_alarm(source="gui-simulate")
+        alarm_ctrl.trigger(source="gui-simulate")
 
-    def gui_mute(self):
+    def on_mute(self):
         alarm_ctrl.mute()
+        add_history("Mute über GUI")
         self.detail_var.set("Letzte Aktion: Mute")
-        add_history("GUI: Mute gedrückt")
 
-    def gui_reset(self):
+    def on_reset(self):
         alarm_ctrl.reset()
+        add_history("Reset über GUI")
         self.detail_var.set("Letzte Aktion: Reset")
-        add_history("GUI: Reset gedrückt")
+
+    def browse_mp3(self):
+        p = filedialog.askopenfilename(title="Wähle Alarm-MP3", filetypes=[("MP3 Dateien", "*.mp3"), ("Alle Dateien", "*.*")])
+        if p:
+            self.mp3_var.set(p)
+
+    def save_settings(self):
+        global ALARM_MP3, VOLUME_PERCENT, config
+        ALARM_MP3 = self.mp3_var.get()
+        config["ALARM_MP3"] = ALARM_MP3
+        save_config(config)
+        add_history("Einstellungen gespeichert")
+        messagebox.showinfo("Settings", "Einstellungen gespeichert")
+
+    def force_led_on(self):
+        try:
+            GPIO.output(PIN_OUTPUT_LED, GPIO.HIGH)
+            add_history("LED manuell an")
+        except Exception:
+            LOG.exception("LED ON failed")
+
+    def force_led_off(self):
+        try:
+            GPIO.output(PIN_OUTPUT_LED, GPIO.LOW)
+            add_history("LED manuell aus")
+        except Exception:
+            LOG.exception("LED OFF failed")
 
     def on_exit(self):
-        if messagebox.askyesno("Exit", "Programm wirklich beenden?"):
-            LOG.info("GUI Exit gedrückt")
+        if messagebox.askokcancel("Beenden", "Programm wirklich beenden?"):
+            LOG.info("Beende via GUI")
             _stop_event.set()
             audio_cmd_q.put(("exit", None))
             try:
@@ -553,17 +648,22 @@ class AlarmGUI:
             except Exception:
                 pass
 
+    def toggle_fullscreen(self):
+        try:
+            cur = self.root.attributes("-fullscreen")
+            self.root.attributes("-fullscreen", not cur)
+        except Exception:
+            pass
+
     def update_ui(self):
         with _state_lock:
             active = alarm_active
         self.status_var.set("Status: ALARM" if active else "Status: Ready")
-        # update led glow/pulse
-        self._led_update(active)
+        self._led_render(active)
 
-        # audio state
         with audio_playing_lock:
             ap = audio_playing
-        self.audio_var.set(f"Audio: {'Playing' if ap else 'Stopped'}")
+        self.audio_var.set("Audio: Playing" if ap else "Audio: Stopped")
         if ap:
             try:
                 self.progress.start(8)
@@ -575,103 +675,85 @@ class AlarmGUI:
             except Exception:
                 pass
 
-        # schedule next update
+        # update history entry preview
+        if history:
+            ts, msg = history[0]
+            self.detail_var.set(f"Letzte Aktion: {msg} ({ts})")
+
         if not _stop_event.is_set():
             self.root.after(150, self.update_ui)
 
     def update_history(self):
-        # sync history to treeview
-        cur_items = self.history_tv.get_children()
-        # clear and reinsert (keeps simple)
-        for it in cur_items:
-            self.history_tv.delete(it)
-        for ts, ev in list(history)[:200]:
-            self.history_tv.insert("", "end", values=(ts, ev))
+        self.history_lv.delete(0, tk.END)
+        for ts, msg in list(history)[:200]:
+            self.history_lv.insert(tk.END, f"{ts} • {msg}")
         if not _stop_event.is_set():
             self.root.after(1000, self.update_history)
 
-    def browse_mp3(self):
-        path = filedialog.askopenfilename(title="Wähle Alarm-MP3", filetypes=[("MP3 Dateien", "*.mp3"), ("All files", "*.*")])
-        if path:
-            self.mp3_var.set(path)
-
-    def save_settings(self):
-        global ALARM_MP3, VOLUME_PERCENT, config
-        ALARM_MP3 = self.mp3_var.get()
-        config["ALARM_MP3"] = ALARM_MP3
-        save_config(config)
-        add_history("Einstellungen gespeichert")
-        messagebox.showinfo("Settings", "Einstellungen wurden gespeichert.")
-
-    def force_led_on(self):
-        try:
-            GPIO.output(PIN_output_LED, GPIO.HIGH)
-            add_history("LED manuell eingeschaltet")
-        except Exception:
-            LOG.exception("LED on failed")
-
-    def force_led_off(self):
-        try:
-            GPIO.output(PIN_output_LED, GPIO.LOW)
-            add_history("LED manuell ausgeschaltet")
-        except Exception:
-            LOG.exception("LED off failed")
-
-    def toggle_fullscreen(self):
-        cur = self.root.attributes("-fullscreen")
-        self.root.attributes("-fullscreen", not cur)
-
-# --- Signal handler ------------------------------------------------------
-def signal_handler(sig, frame):
-    LOG.info("Signal empfangen, beende sauber...")
-    _stop_event.set()
-    audio_cmd_q.put(("exit", None))
+# --- Signal handling -----------------------------------------------------
+def _safe_quit_tk():
     try:
-        for w in tk._default_root.children.values():
+        root = getattr(tk, "_default_root", None)
+        if root:
             try:
-                w.quit()
+                root.quit()
             except Exception:
                 pass
     except Exception:
         pass
+
+
+def signal_handler(sig, frame):
+    LOG.info("Signal empfangen: beende sauber...")
+    _stop_event.set()
+    audio_cmd_q.put(("exit", None))
+    _safe_quit_tk()
     time.sleep(0.2)
     try:
         GPIO.cleanup()
     except Exception:
         pass
-    LOG.info("GPIO cleaned up. Exit.")
-    raise SystemExit(0)
+    LOG.info("Cleanup done - exit")
+    try:
+        sys.exit(0)
+    except SystemExit:
+        raise
 
-# --- Start everything ----------------------------------------------------
+# --- Main ----------------------------------------------------------------
 def main():
     global ALARM_MP3
-    LOG.info("Start application (SIMULATE_GPIO=%s)", SIMULATE_GPIO)
-
+    LOG.info("Starte Anwendung (SIMULATE_GPIO=%s)", SIMULATE_GPIO)
     if not os.path.exists(ALARM_MP3):
         LOG.warning("Alarm-MP3 nicht gefunden: %s", ALARM_MP3)
         add_history("Warnung: Alarm-MP3 nicht gefunden")
 
-    # Start AudioWorker
+    # Audio Worker starten
     audio_worker = AudioWorker(audio_cmd_q, device=SOUND_DEVICE)
     audio_worker.start()
 
-    # Hintergrund-Threads
-    thread_status = threading.Thread(target=status_light_loop, daemon=True)
-    thread_status.start()
-    thread_main = threading.Thread(target=main_loop, daemon=True)
-    thread_main.start()
+    # Hintergrundthreads
+    t1 = threading.Thread(target=status_led_loop, daemon=True)
+    t1.start()
+    t2 = threading.Thread(target=monitor_alarm_button, daemon=True)
+    t2.start()
 
-    # Setup signal handling
+    # Signals
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Tkinter GUI im Hauptthread
-    root = tk.Tk()
-    app = AlarmGUI(root)
+    # Tk root
+    try:
+        root = tk.Tk()
+    except Exception:
+        LOG.exception("Tkinter Root konnte nicht erstellt werden")
+        raise
+
+    app = AlarmApp(root)
+
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        LOG.info("KeyboardInterrupt in Tk mainloop")
+        LOG.info("KeyboardInterrupt im mainloop")
     finally:
         _stop_event.set()
         audio_cmd_q.put(("exit", None))
